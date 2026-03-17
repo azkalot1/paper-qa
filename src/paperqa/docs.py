@@ -22,7 +22,7 @@ from lmi.utils import gather_with_concurrency
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperqa.clients import DEFAULT_CLIENTS, DocMetadataClient
-from paperqa.core import llm_parse_json, map_fxn_summary
+from paperqa.core import llm_parse_json, map_fxn_summary, strip_think_tags
 from paperqa.llms import (
     NumpyVectorStore,
     VectorStore,
@@ -204,6 +204,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                 ],
             )
             citation = cast("str", result.text)
+            citation = strip_think_tags(citation) if citation else citation
             if (
                 len(citation) < 3  # noqa: PLR2004
                 or "Unknown" in citation
@@ -638,7 +639,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     name="pre",
                 )
             session.add_tokens(pre)
-            pre_str = pre.text
+            pre_str = strip_think_tags(pre.text) if pre.text else pre.text
 
         context_str = await query_settings.context_serializer(
             contexts=contexts,
@@ -678,6 +679,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     name="answer",
                 )
             answer_text = cast("str", answer_result.text)
+            answer_text = strip_think_tags(answer_text) if answer_text else answer_text
             answer_reasoning = answer_result.reasoning_content
             session.add_tokens(answer_result)
         # it still happens
@@ -705,10 +707,11 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     callbacks=callbacks,
                     name="post",
                 )
-            answer_text = cast("str", post.text)
+            post_text = cast("str", post.text)
+            post_text = strip_think_tags(post_text) if post_text else post_text
             answer_reasoning = post.reasoning_content
             session.add_tokens(post)
-            answer_text = f"{answer_text}\n\n{post.text}"
+            answer_text = f"{answer_text}\n\n{post_text}"
 
         # now at end we modify, so we could have retried earlier
         session.raw_answer = answer_text

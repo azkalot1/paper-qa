@@ -21,7 +21,7 @@ EOF
 
 PYVER="3.11"
 EXTRAS="pymupdf,nemotron"
-VENV=".venv"
+VENV_DIR=".venv"
 INSTALL_PYTHON=false
 JUPYTER=false
 
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -p|--python)         PYVER="$2";  shift 2 ;;
         -e|--extras)         EXTRAS="$2"; shift 2 ;;
-        -v|--venv)           VENV="$2";   shift 2 ;;
+        -v|--venv)           VENV_DIR="$2"; shift 2 ;;
         --install-python)    INSTALL_PYTHON=true; shift ;;
         --jupyter)           JUPYTER=true; shift ;;
         -h|--help)           usage ;;
@@ -64,9 +64,9 @@ if ! command -v uv &>/dev/null; then
 fi
 
 # ── 3. Create venv & install ────────────────────────────────────────
-echo "==> Creating venv '$VENV' with Python $PYVER..."
-uv venv --python "$PYVER" "$VENV"
-source "$VENV/bin/activate"
+echo "==> Creating venv '$VENV_DIR' with Python $PYVER..."
+uv venv --python "$PYVER" "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
 
 echo "==> Installing paper-qa in editable mode with extras: [$EXTRAS]"
 uv pip install -e ".[$EXTRAS]"
@@ -86,4 +86,4 @@ fi
 
 echo ""
 echo "Done! Activate the environment with:"
-echo "  source $REPO_ROOT/$VENV/bin/activate"
+echo "  source $REPO_ROOT/$VENV_DIR/bin/activate"

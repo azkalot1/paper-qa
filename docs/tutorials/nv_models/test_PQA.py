@@ -66,7 +66,7 @@ DEFAULT_PARSE_MODEL = "nvidia/nemotron-parse"
 DEFAULT_EMBED_MODEL = "nvidia/nvidia/llama-3.2-nv-embedqa-1b-v2"
 DEFAULT_VLM_MODEL = "nvidia/nvidia/nemotron-nano-12b-v2-vl"
 
-DEFAULT_QUESTION = "What experiments are carried out?"
+DEFAULT_QUESTION = "Desctibe difference in surivival in patients momelotinib vs control"
 ALL_STAGES = ("add", "query", "agent", "ask", "verify", "multi")
 
 
@@ -106,12 +106,13 @@ def build_settings(args: argparse.Namespace) -> "Settings":
         parse_pdf_fn = parse_pdf_to_pages
         reader_config.update({
             "dpi": args.dpi,
+            "failover_parser": args.failover_parser,
             "api_params": {
                 "api_base": args.parse_base_url,
                 "api_key": args.parse_api_key,
                 "model_name": args.parse_model,
                 "temperature": 0,
-                "max_tokens": 8995,
+                "max_tokens": args.parse_max_tokens,
             },
         })
 
@@ -662,9 +663,13 @@ def parse_args() -> argparse.Namespace:
     g = p.add_argument_group("Parser / RAG tuning")
     g.add_argument("--parser", choices=("nemotron", "default"), default="nemotron",
                     help="PDF parser to use. 'default' uses installed fallback (pypdf/pymupdf).")
-    g.add_argument("--chunk-chars", type=int, default=5000)
+    g.add_argument("--chunk-chars", type=int, default=2500)
     g.add_argument("--overlap", type=int, default=250)
     g.add_argument("--dpi", type=int, default=150, help="Page render DPI for nemotron parser.")
+    g.add_argument("--parse-max-tokens", type=int, default=8995,
+                    help="Max tokens for nemotron-parse API calls.")
+    g.add_argument("--failover-parser", type=str, default="paperqa_pymupdf.parse_pdf_to_pages",
+                    help="Dotted path to fallback parser when nemotron-parse fails on a page.")
     g.add_argument("--evidence-k", type=int, default=5)
     g.add_argument("--max-sources", type=int, default=3)
     g.add_argument("--verbosity", type=int, default=3, choices=(0, 1, 2, 3))

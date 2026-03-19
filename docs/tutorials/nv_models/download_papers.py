@@ -13,8 +13,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import requests
@@ -26,21 +28,56 @@ PAPERS: list[dict[str, str]] = [
         "description": "Vaswani et al. - Attention Is All You Need (2017)",
     },
     {
-        "name": "abosabie2026_thrombo_inflammatory_mpn.pdf",
-        "url": "https://www.biorxiv.org/content/10.64898/2026.02.16.706250v1.full.pdf",
-        "description": "Abosabie et al. - Thrombo-inflammatory endothelial signatures in JAK2-mutated MPN (2026)",
+        "name": "palandri2026_momelotinib_os_myelofibrosis.pdf",
+        "url": "pmc:PMC12924849",
+        "description": "Palandri et al. - Overall survival with momelotinib vs. BAT in ruxolitinib-experienced myelofibrosis (2026)",
     },
 ]
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+PMC_OA_API = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi"
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def resolve_pmc_pdf_url(pmc_id: str, timeout: int = 30) -> str:
+    """Use the NCBI PMC Open Access API to resolve a PMC ID to a PDF URL."""
+    clean_id = pmc_id.replace("pmc:", "").replace("PMC", "")
+    resp = requests.get(
+        PMC_OA_API, params={"id": f"PMC{clean_id}"}, timeout=timeout
+    )
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+
+    error = root.find(".//error")
+    if error is not None:
+        raise RuntimeError(f"PMC OA API error for PMC{clean_id}: {error.text}")
+
+    for link in root.findall(".//link"):
+        fmt = link.get("format", "")
+        href = link.get("href", "")
+        if fmt == "pdf" and href:
+            return href.replace("ftp://", "https://")
+
+    raise RuntimeError(
+        f"No PDF link found via PMC OA API for PMC{clean_id}. "
+        "Article may not be in the Open Access subset."
+    )
 
 
 def download(url: str, dest: Path, timeout: int = 120) -> None:
+    if url.startswith("pmc:"):
+        url = resolve_pmc_pdf_url(url, timeout=timeout)
+        print(f"      resolved → {url}")
+
     session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+    session.headers.update(BROWSER_HEADERS)
     resp = session.get(url, timeout=timeout, allow_redirects=True)
     resp.raise_for_status()
     if len(resp.content) < 1024:

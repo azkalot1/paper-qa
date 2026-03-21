@@ -318,6 +318,7 @@ class PaperQAEnvironment(Environment[EnvironmentState]):
                 False,
             )
 
+        per_tool_timeout = min(300.0, self._settings.agent.timeout / 2)
         response_messages = cast(
             "list[Message]",
             await self.exec_tool_calls(
@@ -325,6 +326,7 @@ class PaperQAEnvironment(Environment[EnvironmentState]):
                 concurrency=True,  # We allow tools to define their own concurrency
                 state=self.state,
                 handle_tool_exc=True,
+                exec_timeout=per_tool_timeout,
             ),
         ) or [Message(content=f"No tool calls input in tool request {action}.")]
         done = any(

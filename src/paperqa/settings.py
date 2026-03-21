@@ -377,6 +377,14 @@ class ParsingSettings(BaseModel):
         default=individual_media_enrichment_prompt_template,
         description="Prompt template for enriching media.",
     )
+    enrichment_concurrency: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max concurrent enrichment LLM calls per document. Lower this for"
+            " local/self-hosted VLMs that cannot handle many parallel requests."
+        ),
+    )
 
     @property
     def should_parse_and_enrich_media(self) -> tuple[bool, bool]:
@@ -1141,7 +1149,11 @@ class Settings(BaseSettings):
                             media.info["is_irrelevant"],
                             media.info["enriched_description"],
                         ) = parse_enrichment_irrelevance(result.text)
-                except (litellm.InternalServerError, litellm.BadRequestError) as exc:
+                except (
+                    litellm.InternalServerError,
+                    litellm.BadRequestError,
+                    litellm.Timeout,
+                ) as exc:
                     # Handle image > 5-MB failure mode 1:
                     # > litellm.BadRequestError: AnthropicException -
                     # > {"type":"error","error":{"type":"invalid_request_error",
@@ -1153,7 +1165,17 @@ class Settings(BaseSettings):
                     # > "message":"messages.0.content.0.image.source.base64: image exceeds 5 MB maximum: 5690780 bytes > 5242880 bytes"},  # noqa: E501, W505
                     # > "request_id":"req_abc123"}.
                     # And the image being corrupt (but a reasonable size)
-                    if (
+                    # litellm.Timeout: VLM enrichment can exceed the default 60s
+                    # timeout for large base64-encoded images; skip gracefully
+                    # instead of crashing the entire indexing run.
+                    if isinstance(exc, litellm.Timeout):
+                        logger.warning(
+                            f"Skipping enrichment for media index {media.index}"
+                            f" on page {page_num} with metadata {media.info} because"
+                            f" the LLM request timed out for {llm.name!r}."
+                            f" Full error message: {exc!r}"
+                        )
+                    elif (
                         isinstance(exc, litellm.InternalServerError)
                         and re.search(
                             r"image exceeds .+ maximum", str(exc), re.IGNORECASE
@@ -1168,7 +1190,17 @@ class Settings(BaseSettings):
                     else:
                         raise
 
-            await asyncio.gather(*list(starmap(enrich_single_media, media_to_enrich)))
+            enrichment_semaphore = asyncio.Semaphore(
+                self.parsing.enrichment_concurrency
+            )
+
+            async def _throttled_enrich(page_num, media):
+                async with enrichment_semaphore:
+                    await enrich_single_media(page_num, media)
+
+            await asyncio.gather(
+                *list(starmap(_throttled_enrich, media_to_enrich))
+            )
 
             # Filter out irrelevant media from parsed_text.content in-place,
             # while counting enrichments and filtration

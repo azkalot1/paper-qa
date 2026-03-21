@@ -370,18 +370,21 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
 
         # 1. Calculate text embeddings if not already present
         if embedding_model and texts[0].embedding is None:
+            embeddable_texts = await asyncio.gather(
+                *(
+                    t.get_embeddable_text(
+                        all_settings.parsing.should_parse_and_enrich_media[1]
+                    )
+                    for t in texts
+                )
+            )
+            # Replace empty/whitespace-only strings with a single space so
+            # embedding APIs that reject empty inputs don't fail the whole
+            # document (can happen with image-only pages after parsing).
+            embeddable_texts = [t if t.strip() else " " for t in embeddable_texts]
             for t, t_embedding in zip(
                 texts,
-                await embedding_model.embed_documents(
-                    texts=await asyncio.gather(
-                        *(
-                            t.get_embeddable_text(
-                                all_settings.parsing.should_parse_and_enrich_media[1]
-                            )
-                            for t in texts
-                        )
-                    )
-                ),
+                await embedding_model.embed_documents(texts=embeddable_texts),
                 strict=True,
             ):
                 t.embedding = t_embedding

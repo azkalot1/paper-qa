@@ -442,19 +442,22 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
         self, embedding_model: EmbeddingModel, with_enrichment: bool = False
     ) -> None:
         texts = [t for t in self.texts if t not in self.texts_index]
-        # For any embeddings we are supposed to lazily embed, embed them now
         to_embed = [t for t in texts if t.embedding is None]
         if to_embed:
-            for t, t_embedding in zip(
-                to_embed,
-                await embedding_model.embed_documents(
-                    texts=await asyncio.gather(
-                        *(t.get_embeddable_text(with_enrichment) for t in to_embed)
-                    )
-                ),
-                strict=True,
-            ):
-                t.embedding = t_embedding
+            async with asyncio.timeout(300):
+                for t, t_embedding in zip(
+                    to_embed,
+                    await embedding_model.embed_documents(
+                        texts=await asyncio.gather(
+                            *(
+                                t.get_embeddable_text(with_enrichment)
+                                for t in to_embed
+                            )
+                        )
+                    ),
+                    strict=True,
+                ):
+                    t.embedding = t_embedding
         await self.texts_index.add_texts_and_embeddings(texts)
 
     async def retrieve_texts(

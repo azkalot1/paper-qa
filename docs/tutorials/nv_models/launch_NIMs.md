@@ -72,6 +72,31 @@ A reusable script that wraps `docker run` for any NIM container.
     nvcr.io/nim/nvidia/nemotron-parse:latest
 ```
 
+#### Multiple parse instances (round-robin load balancing)
+
+Nemotron-Parse is a single-GPU model — passing multiple GPUs to one container
+won't help. To scale parsing throughput, launch **one instance per GPU** on
+different ports:
+
+```bash
+./launch_nim.sh --name parse0 --gpus 0 --port 8002 nvcr.io/nim/nvidia/nemotron-parse:latest
+./launch_nim.sh --name parse1 --gpus 1 --port 8003 nvcr.io/nim/nvidia/nemotron-parse:latest
+./launch_nim.sh --name parse2 --gpus 2 --port 8004 nvcr.io/nim/nvidia/nemotron-parse:latest
+./launch_nim.sh --name parse3 --gpus 3 --port 8005 nvcr.io/nim/nvidia/nemotron-parse:latest
+```
+
+Then pass all endpoints as a comma-separated list. The `nim_runner.py`
+round-robin will distribute per-page requests across them:
+
+```bash
+PQA_PARSE_API_BASE=http://localhost:8002/v1,http://localhost:8003/v1,http://localhost:8004/v1,http://localhost:8005/v1 \
+PQA_INDEX_CONCURRENCY=4 \
+...
+```
+
+> **Tip:** Bump `PQA_INDEX_CONCURRENCY` to match the number of parse instances
+> so multiple PDFs are parsed in parallel, fully utilizing all instances.
+
 ### 2. Embedding model
 
 ```bash

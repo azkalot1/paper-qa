@@ -15,6 +15,7 @@ import http
 import json
 import logging
 import os
+import re
 from enum import StrEnum, unique
 from typing import (
     TYPE_CHECKING,
@@ -64,6 +65,13 @@ logger = logging.getLogger(__name__)
 NVIDIA_API_NEMOTRON_PARSE_RATE_LIMIT = (
     "40 per 1 minute"  # Default rate for Nvidia's API
 )
+
+# Image format for the parse API message payload.
+#   "nim"    – NIM-native HTML tag:  <img src="data:..." />   (default, for NIM containers)
+#   "openai" – OpenAI vision format: {"type":"image_url", ...} (for vLLM / OpenAI-compatible)
+NEMOTRON_PARSE_IMAGE_FORMAT: str = os.environ.get(
+    "NEMOTRON_PARSE_IMAGE_FORMAT", "nim"
+).strip().lower()
 
 
 class NemotronLengthError(ValueError):
@@ -321,6 +329,64 @@ VectorNemotronParseMarkdown = TypeAdapter(list[NemotronParseMarkdown])
 MatrixNemotronParseMarkdownBBox = TypeAdapter(list[list[NemotronParseMarkdownBBox]])
 
 
+# -- Inline bbox parser for vLLM v1.2 raw output format ----------------------
+# vLLM returns bbox data as inline coordinate tags instead of structured JSON:
+#   <x_XMIN><y_YMIN>text<x_XMAX><y_YMAX><class_TYPE>
+# Split on <class_...> boundaries, then extract coords from each segment.
+_INLINE_CLASS_SPLIT_RE = re.compile(r"(<class_[^>]+>)")
+_INLINE_END_COORDS_RE = re.compile(r"<x_([\d.]+)><y_([\d.]+)>\s*$")
+_INLINE_START_COORDS_RE = re.compile(r"^\s*<x_([\d.]+)><y_([\d.]+)>")
+
+
+def _parse_inline_bbox_text(raw: str) -> list[NemotronParseMarkdownBBox]:
+    """Parse vLLM v1.2 inline bbox format into structured objects."""
+    text = raw.strip()
+    if text.startswith("<s>"):
+        text = text[3:]
+
+    parts = _INLINE_CLASS_SPLIT_RE.split(text)
+    results: list[NemotronParseMarkdownBBox] = []
+    for i in range(0, len(parts) - 1, 2):
+        segment = parts[i]
+        class_tag = parts[i + 1]
+
+        cls_match = re.match(r"<class_([^>]+)>", class_tag)
+        if not cls_match:
+            continue
+        cls_name = cls_match.group(1)
+
+        end_match = _INLINE_END_COORDS_RE.search(segment)
+        if not end_match:
+            continue
+        xmax = float(end_match.group(1))
+        ymax = float(end_match.group(2))
+        segment = segment[: end_match.start()]
+
+        start_match = _INLINE_START_COORDS_RE.match(segment)
+        if start_match:
+            xmin = float(start_match.group(1))
+            ymin = float(start_match.group(2))
+            segment = segment[start_match.end() :]
+        else:
+            xmin = 0.0
+            ymin = 0.0
+
+        try:
+            bbox = NemotronParseBBox(
+                xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax,
+            )
+            classification = NemotronParseClassification(cls_name)
+        except (ValueError, ValidationError):
+            continue
+
+        results.append(
+            NemotronParseMarkdownBBox(
+                bbox=bbox, type=classification, text=segment.strip(),
+            )
+        )
+    return results
+
+
 def _is_litellm_timeout_with_408(exc: BaseException) -> bool:
     return (
         isinstance(exc, litellm.Timeout)
@@ -438,9 +504,17 @@ async def _call_nvidia_api(
     tool_spec = ToolCall.from_name(tool_name).model_dump(
         exclude={"id": True, "function": {"arguments"}}
     )
+
+    if NEMOTRON_PARSE_IMAGE_FORMAT == "openai":
+        user_content: str | list[dict] = [
+            {"type": "image_url", "image_url": {"url": image_data}},
+        ]
+    else:
+        user_content = f'<img src="{image_data}" />'
+
     response = await litellm.acompletion(
         model=model_name,
-        messages=[{"role": "user", "content": f'<img src="{image_data}" />'}],
+        messages=[{"role": "user", "content": user_content}],
         tools=[tool_spec],
         tool_choice=tool_spec,
         api_key=api_key,
@@ -487,6 +561,21 @@ async def _call_nvidia_api(
         else:
             assert_never(tool_name)
     except ValidationError as exc:
+        if "<class_" in args_json:
+            inline_results = _parse_inline_bbox_text(args_json)
+            if inline_results:
+                if tool_name == "markdown_bbox":
+                    return inline_results  # type: ignore[return-value]
+                if tool_name == "markdown_no_bbox":
+                    return [  # type: ignore[return-value]
+                        NemotronParseMarkdown(text=item.text or "")
+                        for item in inline_results
+                    ]
+                if tool_name == "detection_only":
+                    return [  # type: ignore[return-value]
+                        NemotronParseAnnotatedBBox(bbox=item.bbox, type=item.type)
+                        for item in inline_results
+                    ]
         raise NemotronBBoxError(
             f"nemotron-parse response {args_json} from tool {tool_name!r}"
             " has invalid bounding box."

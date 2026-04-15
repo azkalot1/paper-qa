@@ -382,11 +382,23 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
             # embedding APIs that reject empty inputs don't fail the whole
             # document (can happen with image-only pages after parsing).
             embeddable_texts = [t if t.strip() else " " for t in embeddable_texts]
-            for t, t_embedding in zip(
-                texts,
-                await embedding_model.embed_documents(texts=embeddable_texts),
-                strict=True,
-            ):
+            embed_max_attempts = 3
+            for attempt in range(1, embed_max_attempts + 1):
+                try:
+                    async with asyncio.timeout(300):
+                        embeddings = await embedding_model.embed_documents(
+                            texts=embeddable_texts
+                        )
+                    break
+                except (TimeoutError, asyncio.TimeoutError):
+                    if attempt == embed_max_attempts:
+                        raise
+                    logger.warning(
+                        "Embedding timed out (attempt %d/%d), retrying...",
+                        attempt,
+                        embed_max_attempts,
+                    )
+            for t, t_embedding in zip(texts, embeddings, strict=True):
                 t.embedding = t_embedding
         # 2. Update texts' and Doc's name
         if doc.docname in self.docnames:

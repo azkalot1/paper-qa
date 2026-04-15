@@ -35,6 +35,24 @@ from paperqa_nemotron.api import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Per-PDF parse statistics — populated by parse_pdf_to_pages, readable by callers.
+# Keyed by str(path). Each value is a dict of counters.
+# ---------------------------------------------------------------------------
+PARSE_STATS: dict[str, dict[str, int]] = {}
+
+
+def _new_page_stats() -> dict[str, int]:
+    return {
+        "pages_total": 0,
+        "pages_ok": 0,
+        "pages_length_error_detection_fallback": 0,
+        "pages_length_error_text_suppressed": 0,
+        "pages_failover_length_error": 0,
+        "pages_failover_retry_error": 0,
+    }
+
+
 WHITE_RGB = (255, 255, 255)
 # On DOI 10.1016/j.neuron.2011.12.023, 36-px was an insufficient border,
 # then on DOI 10.1111/jnc.13398, 42-px was an insufficient border,
@@ -197,6 +215,10 @@ async def parse_pdf_to_pages(
     else:
         call_fn = _call_nvidia_api  # type: ignore[assignment]
 
+    pdf_key = str(path)
+    stats = _new_page_stats()
+    PARSE_STATS[pdf_key] = stats
+
     with closing(pdf_doc):
         page_count = len(pdf_doc)
 
@@ -212,8 +234,9 @@ async def parse_pdf_to_pages(
         render_kwargs["scale"] = dpi / 72
 
     async def call_failover(
-        page_num: int, cause_exc: BaseException
+        page_num: int, cause_exc: BaseException, *, stat_key: str,
     ) -> tuple[str, str | tuple[str, list[ParsedMedia]]]:
+        stats[stat_key] = stats.get(stat_key, 0) + 1
         logger.warning(
             f"Falling back to failover parser {failover_parser} for page {page_num}"
             f" of {path!r} due to {type(cause_exc).__name__}."
@@ -254,6 +277,8 @@ async def parse_pdf_to_pages(
             "markdown_bbox" if needs_bbox else "markdown_no_bbox"
         )
 
+        stats["pages_total"] += 1
+        used_detection_fallback = False
         try:
             try:
                 response = await call_fn(
@@ -262,6 +287,8 @@ async def parse_pdf_to_pages(
             except NemotronLengthError:
                 if tool_name != "markdown_bbox":
                     raise
+                used_detection_fallback = True
+                stats["pages_length_error_detection_fallback"] += 1
                 # Fallback to detection_only + markdown_no_bbox to reinvent
                 # markdown_bbox, bypassing its length error
                 detection_results = await call_fn(
@@ -297,6 +324,7 @@ async def parse_pdf_to_pages(
                             )
                         )
                     except NemotronLengthError:
+                        stats["pages_length_error_text_suppressed"] += 1
                         logger.warning(
                             "Suppressed NemotronLengthError during markdown_no_bbox"
                             f" fallback for {detection.type} bbox on page {i + 1} of {path!r}.",
@@ -312,7 +340,10 @@ async def parse_pdf_to_pages(
         except NemotronLengthError as length_err:
             # This length failure is from the detection_only tool
             if failover_parser is not None:
-                return await call_failover(page_num=i + 1, cause_exc=length_err)
+                return await call_failover(
+                    page_num=i + 1, cause_exc=length_err,
+                    stat_key="pages_failover_length_error",
+                )
             raise RuntimeError(
                 f"Failed to attain a valid response for page {i}"
                 f" of PDF at path {path!r}"
@@ -329,7 +360,10 @@ async def parse_pdf_to_pages(
                 )
                 and failover_parser is not None
             ):
-                return await call_failover(page_num=i + 1, cause_exc=inner_exc)
+                return await call_failover(
+                    page_num=i + 1, cause_exc=inner_exc,
+                    stat_key="pages_failover_retry_error",
+                )
             if isinstance(inner_exc, NemotronBBoxError):
                 # Nice-ify nemotron-parse failures to speed debugging
                 raise RuntimeError(  # noqa: TRY004
@@ -341,6 +375,9 @@ async def parse_pdf_to_pages(
                     f" temperature {api_params.get('temperature')}."
                 ) from model_err
             raise
+
+        if not used_detection_fallback:
+            stats["pages_ok"] += 1
         del image_data_uri  # Free up memory as API call is done
 
         # Per https://docs.nvidia.com/nim/vision-language-models/1.5.0/examples/nemotron-parse/overview.html#nemotron-parse-overview
@@ -477,6 +514,21 @@ async def parse_pdf_to_pages(
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
+
+    non_ok = stats["pages_total"] - stats["pages_ok"]
+    if non_ok > 0:
+        logger.warning(
+            f"Parse stats for {path!r}: {stats['pages_total']} pages,"
+            f" {stats['pages_ok']} ok,"
+            f" {stats['pages_length_error_detection_fallback']} detection-fallback,"
+            f" {stats['pages_length_error_text_suppressed']} text-suppressed,"
+            f" {stats['pages_failover_length_error']} failover(length),"
+            f" {stats['pages_failover_retry_error']} failover(retry)."
+        )
+    else:
+        logger.info(
+            f"Parse stats for {path!r}: {stats['pages_total']} pages, all ok."
+        )
 
     # No need to reflect border or api_params such as api_base or temperature here
     multimodal_string = (

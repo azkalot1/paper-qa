@@ -62,8 +62,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-NVIDIA_API_NEMOTRON_PARSE_RATE_LIMIT = (
-    "40 per 1 minute"  # Default rate for Nvidia's API
+_env_rate_limit = os.environ.get("NEMOTRON_PARSE_RATE_LIMIT", "").strip()
+NVIDIA_API_NEMOTRON_PARSE_RATE_LIMIT: str | None = (
+    None if _env_rate_limit.lower() == "none" else (_env_rate_limit or "40 per 1 minute")
+)
+
+NEMOTRON_PARSE_TIMEOUT: float | None = (
+    float(v) if (v := os.environ.get("NEMOTRON_PARSE_TIMEOUT", "").strip()) else None
+)
+
+# v1.2 prompt token controlling text-in-picture extraction.
+# "no"  → <predict_no_text_in_pic>  (skip text from embedded images, faster, fewer length errors)
+# "yes" → <predict_text_in_pic>     (extract text from photographs/figures)
+# ""    → omit the token entirely   (v1.1 compat, but degrades v1.2 quality)
+_text_in_pic_raw = os.environ.get("NEMOTRON_PARSE_TEXT_IN_PIC", "").strip().lower()
+NEMOTRON_PARSE_TEXT_IN_PIC: str | None = (
+    "<predict_no_text_in_pic>" if _text_in_pic_raw == "no"
+    else "<predict_text_in_pic>" if _text_in_pic_raw == "yes"
+    else None
 )
 
 # Image format for the parse API message payload.
@@ -506,12 +522,17 @@ async def _call_nvidia_api(
     )
 
     if NEMOTRON_PARSE_IMAGE_FORMAT == "openai":
-        user_content: str | list[dict] = [
-            {"type": "image_url", "image_url": {"url": image_data}},
-        ]
+        user_content: str | list[dict] = []
+        if NEMOTRON_PARSE_TEXT_IN_PIC:
+            user_content.append({"type": "text", "text": NEMOTRON_PARSE_TEXT_IN_PIC})
+        user_content.append({"type": "image_url", "image_url": {"url": image_data}})
     else:
-        user_content = f'<img src="{image_data}" />'
+        prefix = NEMOTRON_PARSE_TEXT_IN_PIC or ""
+        user_content = f'{prefix}<img src="{image_data}" />'
 
+    timeout_kwargs: dict = {}
+    if NEMOTRON_PARSE_TIMEOUT is not None and "timeout" not in completion_kwargs:
+        timeout_kwargs["timeout"] = NEMOTRON_PARSE_TIMEOUT
     response = await litellm.acompletion(
         model=model_name,
         messages=[{"role": "user", "content": user_content}],
@@ -522,6 +543,7 @@ async def _call_nvidia_api(
         # Explicitly specify OpenAI-compatible provider over Nvidia NIM provider,
         # so this works with both Nvidia API and DGX Cloud Lepton
         custom_llm_provider=litellm.types.utils.LlmProviders.CUSTOM_OPENAI,
+        **timeout_kwargs,
         **completion_kwargs,
     )
     if (

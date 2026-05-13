@@ -1,5 +1,5 @@
 """Nvidia nemotron-backed readers for PaperQA."""
 
-from .reader import parse_pdf_to_pages
+from .reader import PARSE_STATS, parse_pdf_to_pages
 
-__all__ = ["parse_pdf_to_pages"]
+__all__ = ["PARSE_STATS", "parse_pdf_to_pages"]

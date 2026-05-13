@@ -73,15 +73,19 @@ async def agent_query(
 
     agent_logger.info(f"[bold blue]Answer: {response.session.answer}[/bold blue]")
 
-    await answers_index.add_document(
-        {
-            "file_location": str(response.session.id),
-            "body": response.session.answer,
-            "question": response.session.question,
-        },
-        document=response,
-    )
-    await answers_index.save_index()
+    try:
+        async with asyncio.timeout(60):
+            await answers_index.add_document(
+                {
+                    "file_location": str(response.session.id),
+                    "body": response.session.answer,
+                    "question": response.session.question,
+                },
+                document=response,
+            )
+            await answers_index.save_index()
+    except TimeoutError:
+        logger.warning("Saving answers index timed out after 60s, skipping.")
     return response
 
 
@@ -121,7 +125,16 @@ async def run_agent(
     # Build the index once here, and then all tools won't need to rebuild it
     # only build if the a search tool is requested
     if PaperSearch.TOOL_FN_NAME in (settings.agent.tool_names or DEFAULT_TOOL_NAMES):
-        await get_directory_index(settings=settings, build=settings.agent.rebuild_index)
+        try:
+            async with asyncio.timeout(settings.agent.timeout):
+                await get_directory_index(
+                    settings=settings, build=settings.agent.rebuild_index
+                )
+        except TimeoutError:
+            logger.warning(
+                "Index build timed out after %.0f-sec, proceeding without index.",
+                settings.agent.timeout,
+            )
 
     if isinstance(agent_type, str) and agent_type.lower() == FAKE_AGENT_TYPE:
         session, agent_status = await run_fake_agent(
@@ -167,14 +180,26 @@ async def _run_with_timeout_failure(
     if status == AgentStatus.TRUNCATED or not env.state.query_tool_history(
         GenerateAnswer.TOOL_FN_NAME
     ):
-        # Fail over after truncation (too many steps, timeout): just answer
+        # Fail over after truncation (too many steps, timeout): just answer.
+        # Use its own timeout so a hung LLM call here can't block forever
+        # (the main asyncio.timeout only covered the rollout above).
+        fallback_timeout = min(180.0, settings.agent.timeout / 2)
         generate_answer_tool = next(
             filter(lambda x: x.info.name == GenerateAnswer.TOOL_FN_NAME, env.tools)
         )
         action = ToolRequestMessage(
             tool_calls=[ToolCall.from_tool(generate_answer_tool)]
         )
-        await env.exec_tool_calls(message=action, state=env.state, handle_tool_exc=True)
+        try:
+            async with asyncio.timeout(fallback_timeout):
+                await env.exec_tool_calls(
+                    message=action, state=env.state, handle_tool_exc=True
+                )
+        except TimeoutError:
+            logger.warning(
+                "Fallback gen_answer timed out after %.0f-sec, giving up.",
+                fallback_timeout,
+            )
         env.state.record_action(action)
     return env.state.session, status
 

@@ -16,6 +16,19 @@ from paperqa.utils import extract_score, strip_citations
 logger = logging.getLogger(__name__)
 
 
+def strip_think_tags(text: str) -> str:
+    """Strip inline chain-of-thought wrapped in <think>...</think> tags.
+
+    Reasoning models (e.g. nemotron-nano with /think, DeepSeek-R1) may emit
+    their reasoning inline.  This removes everything up to and including the
+    closing </think> tag, returning only the final answer.  If no tag is
+    present the text is returned unchanged.
+    """
+    if "</think>" in text:
+        text = text.split("</think>", 1)[-1].strip()
+    return text
+
+
 def llm_parse_json(text: str) -> dict[str, JsonValue]:
     """Read LLM output and extract JSON data from it."""
     # Removing <think> tags for reasoning models

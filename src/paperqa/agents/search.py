@@ -544,6 +544,15 @@ async def process_file(
                 if not isinstance(e, ValueError | ImpossibleParsingError):
                     # ImpossibleParsingError: parsing failure, don't retry
                     # ValueError: TODOC
+                    # Also treat embedding/LLM BadRequestError as non-retryable
+                    # (e.g. empty text chunks, oversized inputs) so one bad file
+                    # doesn't crash the entire index build.
+                    try:
+                        import litellm
+                        if isinstance(e, litellm.exceptions.BadRequestError):
+                            return
+                    except ImportError:
+                        pass
                     raise
                 return
 

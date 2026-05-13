@@ -22,7 +22,7 @@ from lmi.utils import gather_with_concurrency
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperqa.clients import DEFAULT_CLIENTS, DocMetadataClient
-from paperqa.core import llm_parse_json, map_fxn_summary
+from paperqa.core import llm_parse_json, map_fxn_summary, strip_think_tags
 from paperqa.llms import (
     NumpyVectorStore,
     VectorStore,
@@ -204,6 +204,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                 ],
             )
             citation = cast("str", result.text)
+            citation = strip_think_tags(citation) if citation else citation
             if (
                 len(citation) < 3  # noqa: PLR2004
                 or "Unknown" in citation
@@ -369,20 +370,35 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
 
         # 1. Calculate text embeddings if not already present
         if embedding_model and texts[0].embedding is None:
-            for t, t_embedding in zip(
-                texts,
-                await embedding_model.embed_documents(
-                    texts=await asyncio.gather(
-                        *(
-                            t.get_embeddable_text(
-                                all_settings.parsing.should_parse_and_enrich_media[1]
-                            )
-                            for t in texts
-                        )
+            embeddable_texts = await asyncio.gather(
+                *(
+                    t.get_embeddable_text(
+                        all_settings.parsing.should_parse_and_enrich_media[1]
                     )
-                ),
-                strict=True,
-            ):
+                    for t in texts
+                )
+            )
+            # Replace empty/whitespace-only strings with a single space so
+            # embedding APIs that reject empty inputs don't fail the whole
+            # document (can happen with image-only pages after parsing).
+            embeddable_texts = [t if t.strip() else " " for t in embeddable_texts]
+            embed_max_attempts = 3
+            for attempt in range(1, embed_max_attempts + 1):
+                try:
+                    async with asyncio.timeout(300):
+                        embeddings = await embedding_model.embed_documents(
+                            texts=embeddable_texts
+                        )
+                    break
+                except (TimeoutError, asyncio.TimeoutError):
+                    if attempt == embed_max_attempts:
+                        raise
+                    logger.warning(
+                        "Embedding timed out (attempt %d/%d), retrying...",
+                        attempt,
+                        embed_max_attempts,
+                    )
+            for t, t_embedding in zip(texts, embeddings, strict=True):
                 t.embedding = t_embedding
         # 2. Update texts' and Doc's name
         if doc.docname in self.docnames:
@@ -438,19 +454,22 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
         self, embedding_model: EmbeddingModel, with_enrichment: bool = False
     ) -> None:
         texts = [t for t in self.texts if t not in self.texts_index]
-        # For any embeddings we are supposed to lazily embed, embed them now
         to_embed = [t for t in texts if t.embedding is None]
         if to_embed:
-            for t, t_embedding in zip(
-                to_embed,
-                await embedding_model.embed_documents(
-                    texts=await asyncio.gather(
-                        *(t.get_embeddable_text(with_enrichment) for t in to_embed)
-                    )
-                ),
-                strict=True,
-            ):
-                t.embedding = t_embedding
+            async with asyncio.timeout(300):
+                for t, t_embedding in zip(
+                    to_embed,
+                    await embedding_model.embed_documents(
+                        texts=await asyncio.gather(
+                            *(
+                                t.get_embeddable_text(with_enrichment)
+                                for t in to_embed
+                            )
+                        )
+                    ),
+                    strict=True,
+                ):
+                    t.embedding = t_embedding
         await self.texts_index.add_texts_and_embeddings(texts)
 
     async def retrieve_texts(
@@ -638,7 +657,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     name="pre",
                 )
             session.add_tokens(pre)
-            pre_str = pre.text
+            pre_str = strip_think_tags(pre.text) if pre.text else pre.text
 
         context_str = await query_settings.context_serializer(
             contexts=contexts,
@@ -678,6 +697,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     name="answer",
                 )
             answer_text = cast("str", answer_result.text)
+            answer_text = strip_think_tags(answer_text) if answer_text else answer_text
             answer_reasoning = answer_result.reasoning_content
             session.add_tokens(answer_result)
         # it still happens
@@ -705,10 +725,11 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                     callbacks=callbacks,
                     name="post",
                 )
-            answer_text = cast("str", post.text)
+            post_text = cast("str", post.text)
+            post_text = strip_think_tags(post_text) if post_text else post_text
             answer_reasoning = post.reasoning_content
             session.add_tokens(post)
-            answer_text = f"{answer_text}\n\n{post.text}"
+            answer_text = f"{answer_text}\n\n{post_text}"
 
         # now at end we modify, so we could have retried earlier
         session.raw_answer = answer_text
